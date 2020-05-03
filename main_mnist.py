@@ -10,7 +10,7 @@ from data.cifar import CIFAR10, CIFAR100
 from data.mnist import MNIST
 from data.newsgroups import NewsGroups
 from data.torchlist import ImageFilelist
-from model import MLPNet, CNN_small, CNN, NewsNet, LSTMClassifier
+from model import MLPNet, CNN_small, CNN, NewsNet
 from preact_resnet import PreActResNet18
 import argparse, sys
 import numpy as np
@@ -38,7 +38,6 @@ parser.add_argument('--model_type', type = str, help='[coteaching, coteaching_pl
 parser.add_argument('--fr_type', type = str, help='forget rate type', default='type_1')
 parser.add_argument('--gamblers', dest='use_gambler', action='store_true')
 parser.add_argument('--no-gamblers', dest='use_gambler', action='store_false')
-parser.add_argument('--q', type = float, default=-1)
 parser.set_defaults(use_gambler=True)
 
 args = parser.parse_args()
@@ -225,7 +224,7 @@ def accuracy(logit, target, topk=(1,)):
     return res
 
 # Train the Model
-def train(train_loader,epoch, model1, optimizer1, model2, optimizer2, num_classes, use_gambler=True, truncated=False):
+def train(train_loader,epoch, model1, optimizer1, model2, optimizer2, num_classes, use_gambler=True):
     print('Training %s...' % model_str)
     
     train_total=0
@@ -259,26 +258,15 @@ def train(train_loader,epoch, model1, optimizer1, model2, optimizer2, num_classe
                 if args.model_type=='coteaching_plus':
                     loss_1, loss_2, _, _ = loss_coteaching_plus(logits1, logits2, labels, rate_schedule[epoch], ind, noise_or_not, epoch*i)
         else:
-            if (args.q >= 0):
-                q = args.q
-                output = F.softmax(logits1, dim=1)
-                # print(output[:,nums])
-                loss = -1 * F.nll_loss(output, labels, reduction='none')
-                if (truncated):
-                    loss = loss[loss >= 0.5]
-                loss = (1 - (loss + 1e-10).pow(q)) / q
-
-                loss_1 = torch.mean(loss)
-            else:
-                output = F.softmax(logits1, dim=1)
-                with torch.no_grad():
-                    eps = 9.9
-                    if ('autosched' in args.name):
-                        eps = ((1 - output[:, num_classes-1]) ** 2 + 1e-10) / (torch.sum((output[:, :num_classes-1]) ** 2, (1, -1)))
-                    if (epoch < 10 or 'nll' in args.name):
-                        eps = 1000
-                output = (output + (output[:,num_classes-1] / eps).unsqueeze(1) + 1E-10).log()
-                loss_1 = F.nll_loss(output, labels)
+            output = F.softmax(logits1, dim=1)
+            with torch.no_grad():
+                eps = 9.9
+                if (args.name == 'autosched'):
+                    eps = ((1 - output[:, num_classes-1]) ** 2 + 1e-10) / (torch.sum((output[:, :num_classes-1]) ** 2, (1, -1)))
+                if (epoch < 10 or args.name == 'nll'):
+                    eps = 10
+            output = (output + (output[:,num_classes-1] / eps).unsqueeze(1) + 1E-10).log()
+            loss_1 = F.nll_loss(output, labels)
 
         optimizer1.zero_grad()
         loss_1.backward()
@@ -298,8 +286,8 @@ def train(train_loader,epoch, model1, optimizer1, model2, optimizer2, num_classe
 
     if (not args.use_gambler):
         train_acc2=float(train_correct2)/float(train_total2)
-        return train_acc1, train_acc2, loss_1.item()
-    return train_acc1, None, loss_1.item()
+        return train_acc1, train_acc2
+    return train_acc1, None
 
 # Evaluate the Model
 def evaluate(test_loader, model1, model2):
@@ -351,7 +339,7 @@ def main():
                                               num_workers=args.num_workers,
                                               drop_last=True,
                                               shuffle=False)
-    if (args.use_gambler and args.q < 0):
+    if (args.use_gambler):
         num_classes += 1
         print('using gamblers')
     else:
@@ -391,10 +379,6 @@ def main():
     with open(txtfile, "a") as myfile:
         myfile.write('epoch train_acc1 train_acc2 test_acc1 test_acc2\n')
 
-    eee = 1 - args.noise_rate
-    criteria =(-1)* (eee * np.log(eee) + (1-eee) * np.log((1-eee)/(9.9-1)))
-    print("Criteria " + str(criteria))
-
     epoch=0
     train_acc1=0
     train_acc2=0
@@ -416,11 +400,7 @@ def main():
             adjust_learning_rate(optimizer1, epoch)
             adjust_learning_rate(optimizer2, epoch)
 
-        train_acc1, train_acc2, loss = train(train_loader, epoch, clf1, optimizer1, clf2, optimizer2, num_classes, use_gambler=args.use_gambler)
-        # print(loss)
-        # if (loss < criteria):
-        #     print("Ending at {}".format(epoch))
-        #     break
+        train_acc1, train_acc2 = train(train_loader, epoch, clf1, optimizer1, clf2, optimizer2, num_classes, use_gambler=args.use_gambler)
         # evaluate models
         test_acc1, test_acc2 = evaluate(test_loader, clf1, clf2)
 
@@ -431,8 +411,9 @@ def main():
         with open(txtfile, "a") as myfile:
             myfile.write(str(int(epoch)) + ' '  + str(train_acc1) +' '  + str(train_acc2) +' '  + str(test_acc1) + " " + str(test_acc2) + "\n")
 
-    np.save("run_data/{}_{}_{}_test_acc".format(args.name, args.noise_rate, args.lr), test_accs)
-    np.save("run_data/{}_{}_{}_train_accs".format(args.name, args.noise_rate, args.lr), train_accs)
+    #        str(args.dataset)+"_"+str(args.noise_type)+"_"+str(args.noise_rate)+"_"+str(args.eps)+"_"+str(args.seed)
+    np.save("/home/paul/noisy_labels/b3124134/early_stopping/{}_{}_{}_{}_{}_test_acc".format(args.dataset, args.noise_type, args.noise_rate, args.lr, args.name), test_accs)
+    np.save("/home/paul/noisy_labels/b3124134/early_stopping/{}_{}_{}_{}_{}_train_accs".format(args.dataset, args.noise_type, args.noise_rate, args.lr, args.name), train_accs)
 
 if __name__=='__main__':
     main()
